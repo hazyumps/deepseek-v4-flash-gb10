@@ -1,0 +1,9 @@
+Apache License 2.0
+
+This repository contains configuration, scripts, documentation, and a patch
+file derived from the vLLM project (https://github.com/vllm-project/vllm),
+which is licensed under the Apache License, Version 2.0. The patch in
+patches/ retains its upstream SPDX headers. All original content here
+(scripts, docs, verify harnesses) is released under the same Apache-2.0 terms.
+
+You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
