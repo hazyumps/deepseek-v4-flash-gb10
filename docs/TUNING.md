@@ -15,11 +15,15 @@ markov head**, so the flag changes:
 ```
 
 **`num_speculative_tokens` must be ≥ `dspark_block_size` (5)** or the engine
-crash-loops at startup. The trap: that validator is a pydantic post-init in
-`vllm/config/speculative.py`, **not** in the proposer
-(`v1/spec_decode/dspark.py`) — read only the proposer and you will conclude
-there is no constraint. DeepSeek recommends 7; 5 is what this recipe runs and
-validates.
+raises at startup and crash-loops. The trap: that check lives in
+`SpeculativeConfig.__post_init__` (`vllm/config/speculative.py`), **not** in the
+proposer (`v1/spec_decode/dspark.py`) — read only the proposer and you will
+conclude there is no constraint.
+
+It is a correctness guard, not a perf hint. The fork's own comment: a smaller
+value "feeds the block / Markov-head machinery an unsupported layout and yields
+incorrect (garbled) output rather than merely lower acceptance." DeepSeek
+recommends 7; 5 is what this recipe runs and validates.
 
 At boot you should see, per rank:
 
@@ -35,14 +39,18 @@ Using auxiliary layers from speculative config: (40, 41, 42)
 |---|---|
 | `--enable-expert-parallel` | halves expert weight per node — the OOM fix for fitting on 2 Sparks |
 | `--kv-cache-dtype fp8` + MLA | extremely compact KV — 1,187,206 tokens of cache at 0.80 util |
-| `--max-model-len 393216` + `--gpu-memory-utilization 0.80` | 384K context, ~3.0x concurrency headroom on GA. 0.70 gives ~1.1x. 0.80 is stable but watch unified-mem; `expandable_segments` (below) helps. |
-| `--max-num-seqs 4` + `--max-num-batched-tokens 4096` | 4 became stall-free with the 2026-06 fork rebase (was 2). Higher values re-introduce "prefill starves decode" stalls on this HW. |
+| `--max-model-len 393216` + `--gpu-memory-utilization 0.80` | 384K context, ~3.0x concurrency headroom on GA (verified). 0.80 is stable but watch unified-mem; `expandable_segments` (below) helps. †0.70 gave only ~1.1x on the **beta** weights; not re-measured on GA. |
+| `--max-num-seqs 4` + `--max-num-batched-tokens 4096` | 4 is stall-free here (was 2 before the 2026-06 fork rebase). †The "higher values cause prefill-starves-decode stalls" finding is from the pre-GA build and has not been re-tested on GA. |
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | reduces unified-memory fragmentation/OOM on the big KV allocs |
+| `VLLM_TRITON_MLA_SPARSE=1` | selects the Triton sparse-MLA path — the sm_12x route for DSv4 attention |
 | `--compilation-config FULL_AND_PIECEWISE + custom_ops:all` | recipe-validated cudagraph mode for DSv4 |
 | `--no-enable-flashinfer-autotune` | avoids a 10+ min startup autotune |
-| `DG_JIT_USE_NVRTC=0` + `DG_JIT_NVCC_COMPILER=/usr/local/cuda/bin/nvcc` | DeepGEMM JIT compiles through nvcc; NVRTC misbuilds some sm_12x kernels |
-| `FLASHINFER_DISABLE_VERSION_CHECK=1` | FlashInfer refuses to load against the CUDA 13 stack otherwise |
+| `DG_JIT_USE_NVRTC=0` + `DG_JIT_NVCC_COMPILER=/usr/local/cuda/bin/nvcc` | routes DeepGEMM's JIT through `nvcc` instead of NVRTC and tells it where nvcc is. Both are read by the vendored `vllm/third_party/deep_gemm`. Inherited from the bring-up recipe — we have no recorded failure that it fixes, so treat it as "known-good", not "required". |
+| `FLASHINFER_DISABLE_VERSION_CHECK=1` | bypasses FlashInfer's guard that `flashinfer`, `flashinfer-cubin` and `flashinfer-jit-cache` report matching versions. A source-built FlashInfer next to packaged cubin/jit-cache wheels trips it and raises at import. Nothing to do with CUDA compatibility. |
 | triton / vllm / flashinfer cache volume mounts | persist compiled kernels across restarts (else a recompile "hang" every boot) |
+
+† = carried over from the pre-GA build and not re-measured. Everything else in
+this table was checked against the running GA cluster on 2026-08-03.
 
 **Expected startup warning, not a problem:** with DSpark n=5 and
 `--max-num-seqs 4`, vLLM logs `max_num_scheduled_tokens is set to 4080 based on
@@ -50,14 +58,22 @@ the speculative decoding settings` — it reserves draft-token slots out of the
 4096 budget. Raising `--max-num-batched-tokens` to reclaim the 16 tokens is not
 worth the scheduling instability.
 
-## `reasoning_effort` is mostly a no-op through vLLM
+## `reasoning_effort`: three tiers, not five
 
-GA advertises a `low` reasoning tier, but vLLM's `tokenizers/deepseek_v4.py`
-normalizes the value *before* the encoder's
-`assert reasoning_effort in ['max', None, 'high']`, with a catch-all
-`else: "high"`. So `medium` behaves exactly like `high`, and `low` is
-unreachable. This is byte-identical on beta and GA — don't spend time tuning it
-until the tokenizer changes.
+`vllm/tokenizers/deepseek_v4.py` normalizes the request value before the encoder
+sees it, and the encoder then asserts `reasoning_effort in ['max', None, 'high']`.
+The mapping is:
+
+| you send | you get | effect |
+|---|---|---|
+| `none` | `thinking_mode="chat"`, effort `None` | thinking off |
+| `max` or `xhigh` | `max` | `REASONING_EFFORT_MAX` prefix at message 0 |
+| anything else — incl. `high`, `medium`, `low` | `high` | no prefix |
+
+So GA's advertised `low` tier is unreachable through vLLM, and `medium` is
+byte-identical to `high` — a client sending `medium` has never been getting a
+middle tier. Only `none` and `max`/`xhigh` actually change the prompt. Verified
+in the running GA image; the same code shipped in the beta image.
 
 ## Performance envelope (expect this, not cloud-GPU numbers)
 
@@ -76,6 +92,11 @@ HBM). Long context is comfortable now but a 200K prefill is still ~2 minutes —
 plan it as batch reasoning, not interactive.
 
 ## Wedge vs. recoverable stall (hard-won calibration)
+
+> Calibrated in 2026-05 on the pre-GA build, before the NCCL 2.30.4 upgrade and
+> the 2026-06 fork rebase removed the wedges it was written for. The thresholds
+> below have **not** been re-derived on GA — we simply have not seen a wedge
+> since. Treat them as an upper bound on how patient to be, not a live spec.
 
 `/health`=200 **lies** (separate process). The real liveness signal is
 `vllm:generation_tokens_total` advancing. On dual Spark, normal generation can
