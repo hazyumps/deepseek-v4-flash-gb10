@@ -1,26 +1,40 @@
 # Building the vLLM image for GB10 (sm_121)
 
-> **Honesty up front:** as of 2026-05-30, *stock* `vllm-project/vllm` (incl.
-> v0.22.0) does **not** run DeepSeek-V4-Flash on consumer Blackwell (sm_120/121
-> / GB10). Its fused DeepSeek-V4 indexer + sparse-MLA kernels are sm_90/sm_100
-> only, the sm12x fallback module isn't in the release, and DeepGEMM is gated off
-> for sm_120 — so stock crashes at load. The working base is the **`jasl/vllm`
-> fork**, which adds the SM12x DeepSeek-V4 path (Triton/torch fallbacks). This
-> repo's patch + scripts sit **on top of that fork**.
+> **Honesty up front:** as of 2026-08-03, *stock* `vllm-project/vllm` does **not**
+> run DeepSeek-V4-Flash on consumer Blackwell (sm_120/121 / GB10). Its fused
+> DeepSeek-V4 indexer + sparse-MLA kernels are sm_90/sm_100 only and DeepGEMM's
+> sm_120 support (merged in DeepGEMM #324, 2026-06-24) hasn't reached a vLLM
+> release with the model path wired up — so stock crashes at load. The working
+> base is the **`jasl/vllm` fork**, which adds the SM12x DeepSeek-V4 path.
+> Tracking: vLLM **#41834** (open) and **#41063** (open).
 
 ## Base image
 
 Build from the `jasl/vllm` fork (the SM12x DeepSeek-V4 effort):
 
-- Fork: https://github.com/jasl/vllm  (branch `codex/ds4-sm120-min-enable`, the
-  PR #41834 line; tracks upstream main + the v0.22.0 `deepseek_v4/` package).
+- Fork: https://github.com/jasl/vllm — the PR #41834 line, tagged as
+  `sm120-pr-41834-stable-preview-<date>`.
 - Canonical bring-up reference for bare-metal dual-Spark:
   **https://github.com/jasl/vllm-ds4-sm120-harness** —
   see `docs/dgx_spark_bare_metal_cluster.md` and `docs/sm120_optimization_notes.md`.
 
-Pin a known-good commit (this repo was validated against fork build
-`v0.1.dev16581+gdda4668b5`; newer rebases onto v0.22.0 should also work but
-re-run `verify/t2_verify.py` after).
+**Current pin (validated by this repo):**
+
+| | |
+|---|---|
+| tag | `sm120-pr-41834-stable-preview-20260727d` |
+| commit | `d64074e6f07250f6cd072861aa3c389a929befb9` |
+| reports as | `vLLM 0.1.dev19369+gd64074e6f` |
+| model | `deepseek-ai/DeepSeek-V4-Flash-0731` (GA) |
+
+Newer `stable-preview` tags appear regularly and generally work; re-run
+`docs/VALIDATION.md` after any bump. The **GA weights need a GA-era build** —
+the DSpark draft (3 draft groups + markov head) will not load in a pre-GA image.
+Keep the old image around until the new one serves; that is your rollback.
+
+Previously validated pins, for the record: `73e99c16` (`sm12x-20260617`, fixed
+the streaming tool-call crash and the long-prefill wedge), `8725eb97`
+(`sm12x-20260605`), `dda4668b5` (the original 2026-05 build).
 
 ## Toolchain that worked (GB10 / aarch64)
 
@@ -35,20 +49,34 @@ re-run `verify/t2_verify.py` after).
 ```dockerfile
 # Base: NVIDIA CUDA 13.x aarch64 devel image with the GB10 driver stack.
 # 1. apt install libnccl2=2.30.4-1+cuda13.2 libnccl-dev=2.30.4-1+cuda13.2
-# 2. git clone https://github.com/jasl/vllm && git checkout <pinned-commit>
-# 3. export TORCH_CUDA_ARCH_LIST=12.1a ; pip install -e . (or the fork's build path)
-# 4. install FlashInfer with compute_120f
+# 2. git clone https://github.com/jasl/vllm && git checkout <pinned-tag>
+# 3. git tag -l | xargs -r git tag -d      # see gotcha 1 below
+# 4. export TORCH_CUDA_ARCH_LIST=12.1a ; build the fork (uv build / pip install -e .)
+# 5. install FlashInfer with compute_120f
 # Tag it (the scripts default to IMAGE=vllm-ds4-sm121:cu130).
 ```
 
-The patch in `patches/` is **bind-mounted over** the in-image file at run time
-(see the scripts), so you do **not** rebuild to apply or update it — just
-restart the container.
+## Build gotchas
 
-## Why a patch instead of upstreaming
+1. **`setuptools_scm` chokes on the fork's tags** — version resolution fails and
+   the build dies. Delete the tags in the build stage before building:
+   `git tag -l | xargs -r git tag -d`. (You lose nothing; the version string is
+   derived from the commit either way.)
+2. **The long pole is WAN, not CPU.** `FetchContent` submodule clones (notably
+   `ROCm/aiter`, ~482 MB) dominate; a full build ran ~50 min end to end with
+   only ~3 min of that on the compiler. Don't diagnose a "stall" with
+   `pgrep -c -f cicc|nvcc` — that matches cmake's own
+   `-DCMAKE_CUDA_COMPILER=` argv. Use `pgrep -c -x`.
+3. **Free the RAM first.** The build needs ~107 GB free; stop the serving
+   cluster before building on a node that is also serving.
+4. **Torch version drift** (hit on the 2026-06-05 v0.22.0 rebase, not since): the
+   wheel install pulled an aarch64 *CPU* torch over the CUDA one →
+   `libtorch_cuda.so not found`. Re-check `python -c "import torch;
+   print(torch.version.cuda)"` inside the built image before shipping it.
 
-The indexer top-k op has no sm_120 kernel; the fork falls back to a torch path
-that (a) ran FP32 cuBLAS → froze under concurrency, and (b) had no fused route.
-`patches/sm12x_deep_gemm_fallbacks.py` fixes both (bf16 matmul inputs; a fused
-tf32 Triton MQA-logits top-k path). Tracked upstream at vLLM #41063 / #41834 and
-DeepGEMM #324; when those land natively for sm_120, this patch becomes moot.
+## About `patches/`
+
+The indexer fix this repo originally shipped (`sm12x_deep_gemm_fallbacks.py`,
+bind-mounted over the in-image file) is **no longer used** — its fixes are native
+in the fork, and the file it patched moved in v0.22.0. The launch scripts no
+longer mount it. See `patches/README.md` for what it did and why it mattered.

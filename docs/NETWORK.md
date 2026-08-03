@@ -7,8 +7,9 @@ and multi-minute "wedges." Three things matter, in order.
 ## 1. RDMA must actually engage (not TCP fallback)
 
 The #1 silent failure: NCCL falls back to **TCP sockets** instead of RDMA, because
-the container can't see the RDMA device. Symptoms: ~12 tok/s instead of ~30+,
-plus marker-free stalls under load.
+the container can't see the RDMA device. Symptoms: roughly a third of the
+expected decode rate (~12 tok/s where you should see 40+), plus marker-free
+stalls under load.
 
 - The `docker run` **must** include `--device=/dev/infiniband --cap-add=IPC_LOCK
   --ulimit memlock=-1:-1` (the start scripts do).

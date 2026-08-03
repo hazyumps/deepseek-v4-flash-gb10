@@ -3,21 +3,25 @@
 A reproduction recipe to serve **DeepSeek-V4-Flash** across **two GB10 / DGX
 Spark** boxes (compute capability **sm_121**, consumer Blackwell) with vLLM —
 fast and reliably — at **384K context**, tensor-parallel + expert-parallel over
-a RoCE link, with MTP speculative decoding.
+a RoCE link, with DSpark speculative decoding.
 
-This is the config + patch + runbook that took a dual-Spark setup from
-"crashes / wedges / ~12 tok/s" to "stable, 384K, ~31 tok/s single-stream,
-~405 tok/s prefill @ 9k." If you have two Sparks and want DeepSeek-V4-Flash,
-start here.
+This is the config + runbook that took a dual-Spark setup from "crashes /
+wedges / ~12 tok/s" to "stable, 384K, ~40–60 tok/s single-stream, ~1.7k tok/s
+prefill." If you have two Sparks and want DeepSeek-V4-Flash, start here.
 
 > Not affiliated with vLLM or DeepSeek. Built **on top of the `jasl/vllm` fork**,
-> which carries the SM12x DeepSeek-V4 enablement. Stock vLLM (incl. v0.22.0) does
-> **not** run this model on sm_120/121 yet — see `docs/BUILD.md`. Apache-2.0.
+> which carries the SM12x DeepSeek-V4 enablement. Stock vLLM does **not** run this
+> model on sm_120/121 yet — see `docs/BUILD.md`. Apache-2.0.
+
+**Currently running:** `deepseek-ai/DeepSeek-V4-Flash-0731` (GA) on fork tag
+`sm120-pr-41834-stable-preview-20260727d` (`d64074e6f`), vLLM
+`0.1.dev19369+gd64074e6f`. See [What changed for GA](#what-changed-for-ga-2026-07-31)
+if you set this up from the pre-GA version of this repo.
 
 ## What you need
 - **2× GB10 / DGX Spark** (sm_121, aarch64), CUDA 13.x driver stack.
 - A **RoCE point-to-point link** between the two NICs (one cable). See `docs/NETWORK.md`.
-- The model weights: `deepseek-ai/DeepSeek-V4-Flash`.
+- The model weights: `deepseek-ai/DeepSeek-V4-Flash-0731` (~156 GB on disk, 48 shards).
 - Docker with the NVIDIA runtime on both nodes.
 
 ## Quickstart
@@ -33,44 +37,78 @@ start here.
    # node 2:
    bash scripts/start_worker.sh
    ```
-   Cold boot ~4–5 min (148 GB weights + compile + cudagraph capture).
-5. **Verify** — `docs/VALIDATION.md`. Run `verify/boot-watch.sh` (head),
-   `verify/t2_verify.py` (in-container), and `verify/prefill_test.py`.
-   You should see NCCL 2.30.4, `via NET/IB`, 384K @ ~5.5x concurrency, and the
-   reference tok/s.
+   Cold boot ~4–5 min (156 GB weights + compile + cudagraph capture).
+5. **Verify** — `docs/VALIDATION.md`. Run `verify/boot-watch.sh` (head) and
+   `verify/prefill_test.py`. You should see NCCL 2.30.4, `via NET/IB`,
+   `DSpark draft model loaded`, 384K @ ~3x concurrency, and the reference tok/s.
 
 ## Layout
 ```
-patches/sm12x_deep_gemm_fallbacks.py   # the indexer fix (bf16 + fused tf32 Triton top-k); bind-mounted, no rebuild
-scripts/start_head.sh, start_worker.sh # the tuned launch (TP=2 + EP, MTP n=2, 384K/0.80, NCCL 2.30.4)
+scripts/start_head.sh, start_worker.sh # the tuned launch (TP=2 + EP, DSpark n=5, 384K/0.80, NCCL 2.30.4)
 env.example                            # copy -> env.sh, set your IPs/NICs
-verify/                                # boot-watch, patch-correctness gate, prefill/decode probe
+verify/                                # boot-watch, prefill/decode probe, patch-correctness gate
 docs/BUILD.md                          # the image (jasl/vllm fork, CUDA 13, arch 12.1a, NCCL 2.30.4)
 docs/NETWORK.md                        # RoCE + RDMA passthrough + NCCL 2.30.4 (the reliability layer)
 docs/TUNING.md                         # every flag explained + root causes + perf envelope + wedge calibration
 docs/VALIDATION.md                     # how to confirm you're at the same spot
+patches/                               # HISTORICAL indexer fix -- superseded, see patches/README.md
 ```
 
 ## What's tuned (and why) — short version
 - **NCCL 2.30.4 via LD_PRELOAD** — kills the `shm_broadcast` deadlock (the wedge).
 - **`--device=/dev/infiniband` + caps** — makes NCCL use RDMA, not TCP (~12→~30+ tok/s).
-- **The patch** — sm_121 has no native lightning-indexer kernel; the bf16 fix
-  unfreezes concurrency and the fused Triton top-k adds ~29% prefill (and is more
-  accurate than the bf16 fallback). `verify/t2_verify.py` proves it.
-- **384K @ 0.80 mem-util, MTP n=2, EP, fp8 KV, FULL_AND_PIECEWISE cudagraph** —
+- **DSpark speculative decoding, `num_speculative_tokens: 5`** — GA replaces the
+  single MTP head with 3 DSpark draft groups + a markov head. **n must be ≥
+  `dspark_block_size` (5)** or the engine refuses to start; see `docs/TUNING.md`.
+- **384K @ 0.80 mem-util, EP, fp8 KV, FULL_AND_PIECEWISE cudagraph** —
   see `docs/TUNING.md`.
+- **No patch bind-mount anymore.** The indexer fix this repo shipped is now
+  native in the fork; `patches/` is kept for the historical record only.
 
 ## Performance to expect (it's a bandwidth-bound box, not a cloud GPU)
-~31–34 tok/s single-stream decode; prefill linear ~330–430 tok/s (9k ≈ 22s TTFT,
-200K ≈ minutes). Long context is for batch reasoning, not interactive. Concurrent
-throughput exceeds single-stream once the indexer isn't freezing.
+Measured on the config above (GA, DSpark n=5, thinking off, unique prompts,
+`ignore_eos`, counted from `usage.completion_tokens` — see `docs/VALIDATION.md`
+for why each of those matters):
+
+| metric | value |
+|---|---|
+| single-stream decode | **~47–60 tok/s** on easy content, **~40 tok/s** on real mixed content |
+| prefill | **~1.6–1.8k tok/s**, roughly linear (6k ≈ 3.6s, 24k ≈ 13s, 45k ≈ 27s) |
+| KV cache @ 0.80 util | 1,187,206 tokens → **~3.0x** concurrency at 393,216 |
+
+Single-stream decode is **content-dependent and variable** — DSpark draft
+acceptance depends on how predictable the output is, so run any comparison 3×
+and report a range. Prefill is the stable, trustworthy headline number.
+
+> These are ~4–5x the prefill and ~1.5x the decode of the numbers this repo
+> published in 2026-05 (~330–430 tok/s prefill, ~31–34 tok/s decode). The gain
+> is the fork's native fused DeepGEMM top-k path plus DSpark — not a config
+> change on our side.
 
 ## Status / upstream
-The native fix lives at vLLM **#41834** (SM12x DeepSeek-V4) + DeepGEMM **#324**
-(sm120 kernels) + tracking issue **#41063**. When those merge, stock vLLM should
-serve this without the patch — until then, this recipe is the way.
+- **DeepGEMM #324** (sm120 kernels) — **merged** 2026-06-24 into `nv_dev`.
+- **vLLM #41834** (SM12x DeepSeek-V4 support) — still **open**.
+- **vLLM #41063** (tracking: DeepGEMM SM12.x coverage gaps) — still **open**.
+
+Until #41834 lands, the `jasl/vllm` fork is still the way to run this on
+consumer Blackwell.
+
+## What changed for GA (2026-07-31)
+GA (`-0731`) was **not** a drop-in over the beta, despite identical quantization
+(fp8 e4m3 / ue8m0 / block 128) and the same 43-layer base:
+
+- **Speculative decoding changed shape.** Beta had one MTP head; GA has **3
+  DSpark draft groups + a markov head**. `--speculative-config` moves from
+  `{"method":"deepseek_mtp","num_speculative_tokens":2}` to
+  `{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"greedy"}`.
+- **Bigger checkpoint:** 48 shards / ~167 GB (vs 46 / ~160 GB).
+- **A rebuild is mandatory** — the older image cannot load the DSpark draft.
+- **Concurrency headroom dropped** from ~5.5x to ~3.0x at 384K (bigger weights,
+  same 0.80 util). Still fine for `--max-num-seqs 4`.
+- **`--max-num-seqs` went 2 → 4**, which the 2026-06 fork rebase made stall-free.
+- The indexer patch is **gone from the launch** — its fixes are native now.
 
 ## Credits
 The SM12x DeepSeek-V4 enablement is **jasl**'s work (`jasl/vllm`,
-`jasl/vllm-ds4-sm120-harness`). This repo adds GB10-specific tuning + an indexer
-patch + a reproducible runbook on top. Model: DeepSeek. Engine: vLLM (Apache-2.0).
+`jasl/vllm-ds4-sm120-harness`). This repo adds GB10-specific tuning + a
+reproducible runbook on top. Model: DeepSeek. Engine: vLLM (Apache-2.0).
