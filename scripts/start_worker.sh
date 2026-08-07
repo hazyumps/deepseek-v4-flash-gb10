@@ -6,7 +6,7 @@
 set -euo pipefail
 [ -f "$(dirname "$0")/../env.sh" ] && source "$(dirname "$0")/../env.sh"
 
-IMAGE="${IMAGE:?build per docs/BUILD.md}"
+IMAGE="${IMAGE:?pull or build per docs/BUILD.md}"
 HEAD_IP="${HEAD_IP:-10.255.0.1}"          # the HEAD node's RoCE IP (rendezvous master)
 WORKER_IP="${WORKER_IP:-10.255.0.2}"      # this node's RoCE IP
 ROCE_IFACE="${ROCE_IFACE:-enp1s0f0np0}"

@@ -1,5 +1,27 @@
 # Building the vLLM image for GB10 (sm_121)
 
+## Don't build it if you don't have to
+
+The exact image this repo's numbers come from is published:
+
+```
+docker pull hazyumps/deepseek-v4-flash-gb10:sm121-cu130-20260727d
+```
+
+**`linux/arm64` only** (GB10/aarch64 — it will not run on x86; there is no
+amd64 manifest, so on an x86 host it pulls and then fails at runtime).
+~11 GB compressed. Contains the pinned fork build below; nothing else in this
+repo changes. Building from source takes ~50 minutes, most of it WAN, and needs
+~107 GB free RAM — so pull unless you're changing the fork pin.
+
+To pin by digest instead of tag:
+
+```
+docker pull hazyumps/deepseek-v4-flash-gb10@sha256:08241111a99c5c1d15e14d11cb04f9b897fc3cd31d978f31e38641fed8a1cdb8
+```
+
+The rest of this document is for when you *are* changing it.
+
 > **Honesty up front:** as of 2026-08-03, *stock* `vllm-project/vllm` does **not**
 > run DeepSeek-V4-Flash on consumer Blackwell (sm_120/121 / GB10). Its fused
 > DeepSeek-V4 indexer + sparse-MLA kernels are sm_90/sm_100 only and DeepGEMM's
@@ -53,7 +75,7 @@ the streaming tool-call crash and the long-prefill wedge), `8725eb97`
 # 3. git tag -l | xargs -r git tag -d      # see gotcha 1 below
 # 4. export TORCH_CUDA_ARCH_LIST=12.1a ; build the fork (uv build / pip install -e .)
 # 5. install FlashInfer with compute_120f
-# Tag it (the scripts default to IMAGE=vllm-ds4-sm121:cu130).
+# Tag it and point IMAGE= at it (env.example defaults to the published image).
 ```
 
 ## Build gotchas

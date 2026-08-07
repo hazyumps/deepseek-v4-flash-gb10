@@ -8,7 +8,7 @@
 set -euo pipefail
 [ -f "$(dirname "$0")/../env.sh" ] && source "$(dirname "$0")/../env.sh"
 
-IMAGE="${IMAGE:?build per docs/BUILD.md, e.g. vllm-ds4-sm121:cu130}"
+IMAGE="${IMAGE:?pull or build per docs/BUILD.md, e.g. hazyumps/deepseek-v4-flash-gb10:sm121-cu130-20260727d}"
 HEAD_IP="${HEAD_IP:-10.255.0.1}"        # this node's RoCE IP (NCCL rendezvous master)
 ROCE_IFACE="${ROCE_IFACE:-enp1s0f0np0}" # your RoCE interface (see: ip -br link)
 NCCL_IB_HCA="${NCCL_IB_HCA:-rocep1s0f0}" # your RDMA HCA (see: ibv_devices)

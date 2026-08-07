@@ -25,8 +25,14 @@ if you set this up from the pre-GA version of this repo.
 - Docker with the NVIDIA runtime on both nodes.
 
 ## Quickstart
-1. **Build the image** (once, on each node or shared registry) — `docs/BUILD.md`.
-   Defaults to tag `vllm-ds4-sm121:cu130`.
+1. **Get the image** — pull the prebuilt one on both nodes:
+   ```
+   docker pull hazyumps/deepseek-v4-flash-gb10:sm121-cu130-20260727d
+   ```
+   **`linux/arm64` only** — it is built for GB10/aarch64 and will not run on x86.
+   This is the exact image behind the numbers in this README (fork tag
+   `sm120-pr-41834-stable-preview-20260727d`, `d64074e6f`). To build it yourself
+   instead, see `docs/BUILD.md`.
 2. **Wire the network** — `docs/NETWORK.md`. RDMA passthrough + **NCCL 2.30.4**
    (the wedge fix) are mandatory. Set MTU 9000 on the RoCE link.
 3. **Configure** — `cp env.example env.sh`, edit IPs/iface/HCA for your boxes.
@@ -112,3 +118,17 @@ GA (`-0731`) was **not** a drop-in over the beta, despite identical quantization
 The SM12x DeepSeek-V4 enablement is **jasl**'s work (`jasl/vllm`,
 `jasl/vllm-ds4-sm120-harness`). This repo adds GB10-specific tuning + a
 reproducible runbook on top. Model: DeepSeek. Engine: vLLM (Apache-2.0).
+
+## Licensing of the published image
+
+**Apache-2.0 covers this repository — the scripts, docs and config. It does not
+cover the container image.**
+
+The published image is a derived container built on NVIDIA's `nvidia/cuda`
+sbsa base, and is distributed under the
+[NVIDIA Deep Learning Container License](https://developer.download.nvidia.com/licenses/NVIDIA_Deep_Learning_Container_License.pdf).
+By pulling it you accept those terms. It also bundles vLLM (Apache-2.0), the
+`jasl/vllm` fork's changes, and CUDA 13.2 components under NVIDIA's respective
+licenses. It contains **no model weights** — pull those from DeepSeek yourself.
+
+> This software contains source code provided by NVIDIA Corporation.
