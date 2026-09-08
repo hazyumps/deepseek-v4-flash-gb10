@@ -1,52 +1,50 @@
-# DeepSeek-V4-Flash on 2× NVIDIA GB10 (DGX Spark)
+# [DEPRECATED] DeepSeek-V4-Flash on 2× NVIDIA GB10 (DGX Spark)
 
-A reproduction recipe to serve **DeepSeek-V4-Flash** across **two GB10 / DGX
+> [!WARNING]
+> **DO NOT USE THIS REPOSITORY TO DEPLOY DEEPSEEK-V4-FLASH.** Use the actively maintained
+> [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) project and
+> its
+> [`deepseek-v4-flash-0731` recipe](https://github.com/eugr/spark-vllm-docker/blob/main/recipes/deepseek-v4-flash-0731.yaml).
+> That is also the stack we use now. This repository remains online only as a
+> historical record of an earlier working setup.
+
+For a new deployment, follow eugr's current networking and setup documentation.
+At the time this repository was deprecated, the upstream quick start was:
+
+```bash
+git clone https://github.com/eugr/spark-vllm-docker.git
+cd spark-vllm-docker
+./run-recipe.sh recipes/deepseek-v4-flash-0731.yaml --setup
+```
+
+The recipe uses eugr's tested B12X image and is where ongoing DGX Spark support,
+fixes, and recipe updates live. Do not treat the image, fork, or pinned versions
+below as current guidance.
+
+An archived reproduction record for serving **DeepSeek-V4-Flash** across **two GB10 / DGX
 Spark** boxes (compute capability **sm_121**, consumer Blackwell) with vLLM —
 fast and reliably — at **384K context**, tensor-parallel + expert-parallel over
 a RoCE link, with DSpark speculative decoding.
 
-This is the config + runbook that took a dual-Spark setup from "crashes /
+This was the config + runbook that took a dual-Spark setup from "crashes /
 wedges / ~12 tok/s" to "stable, 384K, ~40–60 tok/s single-stream, ~1.7k tok/s
-prefill." If you have two Sparks and want DeepSeek-V4-Flash, start here.
+prefill." It is retained for historical and troubleshooting reference.
 
 > Not affiliated with vLLM or DeepSeek. Built **on top of the `jasl/vllm` fork**,
 > which carries the SM12x DeepSeek-V4 enablement. Stock vLLM does **not** run this
 > model on sm_120/121 yet — see `docs/BUILD.md`. Apache-2.0.
 
-**Currently running:** `deepseek-ai/DeepSeek-V4-Flash-0731` (GA) on fork tag
+**Historical tested configuration:** `deepseek-ai/DeepSeek-V4-Flash-0731` (GA) on fork tag
 `sm120-pr-41834-stable-preview-20260727d` (`d64074e6f`), vLLM
 `0.1.dev19369+gd64074e6f`. See [What changed for GA](#what-changed-for-ga-2026-07-31)
 if you set this up from the pre-GA version of this repo.
 
-## What you need
-- **2× GB10 / DGX Spark** (sm_121, aarch64), CUDA 13.x driver stack.
-- A **RoCE point-to-point link** between the two NICs (one cable). See `docs/NETWORK.md`.
-- The model weights: `deepseek-ai/DeepSeek-V4-Flash-0731` (~156 GB on disk, 48 shards).
-- Docker with the NVIDIA runtime on both nodes.
+## Archived contents
 
-## Quickstart
-1. **Get the image** — pull the prebuilt one on both nodes:
-   ```
-   docker pull hazyumps/deepseek-v4-flash-gb10:sm121-cu130-20260727d
-   ```
-   **`linux/arm64` only** — it is built for GB10/aarch64 and will not run on x86.
-   This is the exact image behind the numbers in this README (fork tag
-   `sm120-pr-41834-stable-preview-20260727d`, `d64074e6f`). To build it yourself
-   instead, see `docs/BUILD.md`.
-2. **Wire the network** — `docs/NETWORK.md`. RDMA passthrough + **NCCL 2.30.4**
-   (the wedge fix) are mandatory. Set MTU 9000 on the RoCE link.
-3. **Configure** — `cp env.example env.sh`, edit IPs/iface/HCA for your boxes.
-4. **Launch** (head first):
-   ```
-   # node 1:
-   bash scripts/start_head.sh
-   # node 2:
-   bash scripts/start_worker.sh
-   ```
-   Cold boot ~4–5 min (156 GB weights + compile + cudagraph capture).
-5. **Verify** — `docs/VALIDATION.md`. Run `verify/boot-watch.sh` (head) and
-   `verify/prefill_test.py`. You should see NCCL 2.30.4, `via NET/IB`,
-   `DSpark draft model loaded`, 384K @ ~3x concurrency, and the reference tok/s.
+The scripts, patches, validation tools, and old image metadata remain for
+historical comparison only. They are not an installation path. Do not pull or
+base new work on `hazyumps/deepseek-v4-flash-gb10`; use eugr's repository and
+current recipe linked above.
 
 ## Layout
 ```
@@ -117,7 +115,8 @@ GA (`-0731`) was **not** a drop-in over the beta, despite identical quantization
 ## Credits
 The SM12x DeepSeek-V4 enablement is **jasl**'s work (`jasl/vllm`,
 `jasl/vllm-ds4-sm120-harness`). This repo adds GB10-specific tuning + a
-reproducible runbook on top. Model: DeepSeek. Engine: vLLM (Apache-2.0).
+reproducible historical runbook on top. The current deployment and maintained
+recipe are eugr's work. Model: DeepSeek. Engine: vLLM (Apache-2.0).
 
 ## Licensing of the published image
 
